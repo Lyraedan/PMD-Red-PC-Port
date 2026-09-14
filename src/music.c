@@ -628,6 +628,20 @@ void UpdateSound(void)
                 case 1:
                     if (musicPlayer->songIndex == STOP_BGM || IsMusicPlayerPlaying(musicPlayerIndex))
                         musicPlayer->unk0 = 2;
+#ifdef PLATFORM_PC
+                    // PC port: the audio engine advances in wall-clock bursts, so
+                    // a very short SE can reach its end before the state machine
+                    // ever observes it playing. unk0 would sit at 1 forever and
+                    // songIndex would never reset, so IsFanfareSEPlaying() keeps
+                    // reporting the SE as playing (e.g. the Wigglytuff first
+                    // interaction's WAIT_FANFARE2(603) hangs). Reset now instead.
+                    else {
+                        musicPlayer->unk0 = 0;
+                        musicPlayer->songIndex = STOP_SOUND_EFFECT;
+                        musicPlayer->volume = 0;
+                        musicPlayer->isNotMaxVolume = FALSE;
+                    }
+#endif
                     break;
                 case 2:
                     if (IsMusicPlayerPlaying(musicPlayerIndex)) {

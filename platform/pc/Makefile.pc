@@ -114,6 +114,7 @@ PC_SRCS := $(ROOT)/platform/pc/cpu_pc.c \
            $(ROOT)/platform/pc/rom_load_stubs.c \
            $(ROOT)/platform/pc/crash_win.c \
            $(ROOT)/platform/pc/stubs_pc.c \
+           $(ROOT)/platform/pc/cheats_stub.c \
            $(ROOT)/platform/pc/boot_pc.c \
            $(ROOT)/platform/pc/main_pc.c
 PC_SRCS += $(UI_SRCS)
@@ -122,8 +123,9 @@ PC_OBJS := $(patsubst $(ROOT)/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(PC_SRCS))) \
 # Game binary swaps the smoke entry for the real-init entry and links the
 # generated rom_slices_all.o/blob_addrs.o instead of the stub tables.
 # m4a_port.o (the real m4a player) is game-link only: the smoke binary has no
-# song data (audio_data.o) for it to reference.
-GAME_PC_OBJS := $(filter-out $(OBJ_DIR)/platform/pc/main_pc.o $(OBJ_DIR)/platform/pc/rom_load_stubs.o,$(PC_OBJS)) $(OBJ_DIR)/platform/pc/main_game.o $(OBJ_DIR)/platform/pc/m4a_port.o
+# song data (audio_data.o) for it to reference. cheats_pc.o (game-state cheat
+# helpers) is game-link only too: the smoke binary links the empty cheats_stub.o.
+GAME_PC_OBJS := $(filter-out $(OBJ_DIR)/platform/pc/main_pc.o $(OBJ_DIR)/platform/pc/rom_load_stubs.o $(OBJ_DIR)/platform/pc/cheats_stub.o,$(PC_OBJS)) $(OBJ_DIR)/platform/pc/main_game.o $(OBJ_DIR)/platform/pc/m4a_port.o $(OBJ_DIR)/platform/pc/cheats_pc.o
 
 # Host compile flags for game sources (mirrors the GBA .c rule minus agbcc):
 # GBA: $(CPP) $(CPPFLAGS) $< | $(PREPROC) charmap.txt | $(CC1)
@@ -214,6 +216,13 @@ PC_CPPFLAGS := $(filter-out -I$(ROOT)/include,$(CPPFLAGS)) -idirafter $(ROOT)/in
 $(OBJ_DIR)/%.o: $(ROOT)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(PC_CPPFLAGS) -c $< -o $@
+
+# Game-state cheat helpers: compiled like the game sources (-I include, gnu89)
+# so the game headers resolve exactly as they do for src/*.c. Game-link only;
+# the smoke binary links the empty cheats_stub.c instead.
+$(OBJ_DIR)/platform/pc/cheats_pc.o: $(ROOT)/platform/pc/cheats_pc.c
+	@mkdir -p $(dir $@)
+	$(CC) $(GAME_CFLAGS) -I$(ROOT)/include -I$(ROOT)/platform/pc -c $< -o $@
 
 # ImGui core + backends + the overlay (C++); the settings UI lives in ui_pc.cpp.
 $(OBJ_DIR)/%.o: $(ROOT)/%.cpp

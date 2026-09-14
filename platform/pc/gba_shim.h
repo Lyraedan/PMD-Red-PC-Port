@@ -92,6 +92,30 @@ int  Pc_AudioSongReverb(void);             // current song reverb amount (0-127)
 void Pc_AudioWavDump(const char *path, int maxSeconds); // capture mix to WAV
 void Pc_AudioTopUp(int targetSamples);     // keep the SDL queue above a cushion
 
+// ---- Cheats (cheats_pc.c real / cheats_stub.c empty) ----
+// Game-state helpers for the ImGui Cheats window. The real implementations
+// are linked only into pmd-red-game; the smoke binary links empty stubs.
+int  Pc_CheatTeamReady(void);                    // team/save state is live
+s32  Pc_CheatGetMoney(void);
+void Pc_CheatSetMoney(s32 value);                // clamped to MAX_TEAM_MONEY
+s32  Pc_CheatGetSavings(void);
+void Pc_CheatSetSavings(s32 value);              // clamped to MAX_TEAM_SAVINGS
+int  Pc_CheatGiveItem(int itemId, int quantity); // items actually added
+int  Pc_CheatInDungeon(void);                    // leader present in a dungeon
+void Pc_CheatHealTeam(void);                     // full HP + belly for the team
+void Pc_CheatInvincibleLeaderTick(void);         // leader HP = maxHP (per frame)
+int  Pc_CheatRecruitSpecies(int species);        // unlock friend area + add lvl-1 mon
+const char *Pc_CheatSpeciesName(int species);    // species display name
+int  Pc_CheatSpeciesCount(void);                 // NUM_MONSTERS
+void Pc_CheatSpeciesDisplayName(int species, char *out, size_t cap); // charmapped name -> ASCII
+int  Pc_CheatGetTeamRank(void);                  // 0..MAX_TEAM_RANKS-1
+s32  Pc_CheatGetTeamRankPts(void);
+void Pc_CheatSetTeamRank(int rank);              // Normal..Lucario
+void Pc_CheatLevelUpTeam(int levels);            // in-dungeon, all team members
+void Pc_CheatGiveExpToTeam(int exp);             // in-dungeon, all team members
+void Pc_CheatExpBoostTick(void);                 // mark enemies 1.5x EXP (per frame)
+void Pc_CheatInstantKillTick(void);              // enemies at 1 HP (per frame)
+
 // ---- Save backend (save_pc.c) ----
 void Pc_SaveInit(const char *dir); // host save dir (default: exe dir / cwd)
 void Pc_SaveFlush(void);

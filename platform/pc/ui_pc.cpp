@@ -2,11 +2,13 @@
 //
 // Owns the ImGui context and draws a main menu bar toggled with F1:
 //   Game   -> Restart / Settings / Exit
-//   Render -> Placeholder
+//   Cheats -> Open Cheats
 //
 // The Settings window is tabbed (Graphics/Audio/Controls/Boot). Controls
 // rebind the actions from pmd-red.ini (see config_pc.c) — every action takes
 // any number of keys and/or mouse buttons. Boot exposes the launch-arg toggles.
+// The Cheats window calls the game-state helpers in cheats_pc.c (linked only
+// into pmd-red-game; the smoke binary links empty stubs).
 //
 // Uses the SDL_Renderer backend (imgui_impl_sdlrenderer2) to match the renderer
 // already owned by video_pc.c. video_pc.c blits the 240x160 game frame with an
@@ -19,6 +21,13 @@
 // rest of the port always links.
 #include "gba/types.h" // u8/s32 used by the save API in gba_shim.h
 #include "gba_shim.h"
+#include "constants/item.h" // cheat item ids (pure #defines)
+
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
 static int gUiRestartRequested = 0;
 
@@ -44,6 +53,10 @@ extern "C" int Pc_RestartRequested(void) {
 static bool gUiReady = false;
 static bool gMenuVisible = false;
 static bool gSettingsOpen = false;
+static bool gCheatsOpen = false;      // Cheats window visibility
+static bool gCheatInvincible = false; // continuously top-up leader HP in dungeon
+static bool gCheatInstantKill = false; // enemies at 1 HP each frame
+static bool gCheatExpBoost = false;    // enemies give 1.5x EXP each frame
 static int  gCaptureAction = -1; // action awaiting a key press, or -1
 
 extern "C" void Pc_UiInit(void) {
@@ -78,6 +91,10 @@ extern "C" void Pc_UiShutdown(void) {
     gUiReady = false;
     gMenuVisible = false;
     gSettingsOpen = false;
+    gCheatsOpen = false;
+    gCheatInvincible = false;
+    gCheatInstantKill = false;
+    gCheatExpBoost = false;
     gCaptureAction = -1;
 }
 
@@ -86,9 +103,9 @@ extern "C" int Pc_UiIsActive(void) {
 }
 
 extern "C" int Pc_UiWantsCaptureInput(void) {
-    // Any visible overlay (menu bar, settings window) or an in-progress bind
-    // capture means game input must not reach the GBA shadow.
-    return (gMenuVisible || gSettingsOpen || gCaptureAction >= 0) ? 1 : 0;
+    // Any visible overlay (menu bar, settings/cheats window) or an in-progress
+    // bind capture means game input must not reach the GBA shadow.
+    return (gMenuVisible || gSettingsOpen || gCheatsOpen || gCaptureAction >= 0) ? 1 : 0;
 }
 
 extern "C" void Pc_UiProcessEvent(const void *sdlEvent) {
@@ -516,6 +533,246 @@ static void Pc_UiGraphicsTab(void) {
     ImGui::TextDisabled("Most changes apply immediately.");
 }
 
+// Cheat item quick list for the Give items combo. The in-game item table is
+// charmapped, so plain-ASCII names are listed here (ids from constants/item.h).
+static const int kCheatItemIds[] = {
+    ITEM_REVIVER_SEED, ITEM_ORAN_BERRY, ITEM_SITRUS_BERRY, ITEM_MAX_ELIXIR,
+    ITEM_APPLE, ITEM_BIG_APPLE, ITEM_HUNGER_SEED, ITEM_PLAIN_SEED,
+    ITEM_ESCAPE_ORB, ITEM_PETRIFY_ORB, ITEM_TRAWL_ORB, ITEM_REVIVER_ORB,
+    ITEM_X_RAY_SPECS, ITEM_PECHA_SCARF, ITEM_WARP_SCARF, ITEM_FRIEND_BOW,
+    ITEM_JOY_SEED, ITEM_GOLD_RIBBON,
+};
+static const char *const kCheatItemNames[] = {
+    "Reviver Seed", "Oran Berry", "Sitrus Berry", "Max Elixir",
+    "Apple", "Big Apple", "Hunger Seed", "Plain Seed",
+    "Escape Orb", "Petrify Orb", "Trawl Orb", "Reviver Orb",
+    "X-Ray Specs", "Pecha Scarf", "Warp Scarf", "Friend Bow",
+    "Joy Seed", "Gold Ribbon",
+};
+#define CHEAT_ITEM_COUNT (sizeof(kCheatItemIds) / sizeof(kCheatItemIds[0]))
+
+// Rescue-team ranks, indexed by GetRescueTeamRank() (rescue_team_info.h).
+static const char *const kTeamRankNames[] = {
+    "Normal", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Lucario"
+};
+
+// Recruit list state: all species names (decoded to ASCII), a case-insensitive
+// search filter and a page index over the filtered results.
+static std::vector<std::string> sSpeciesNames;  // display names, index = species - 1
+static bool sSpeciesNamesReady = false;
+static char sRecruitSearch[64] = "";
+static int  sRecruitPage = 0;
+static char sRecruitMsg[128] = "";
+
+static void Pc_UiBuildSpeciesNames(void) {
+    int count = Pc_CheatSpeciesCount();
+    int i;
+
+    sSpeciesNames.clear();
+    sSpeciesNames.reserve((size_t)count);
+    for (i = 1; i < count; i++) { // skip MONSTER_NONE (0)
+        char buf[64];
+        Pc_CheatSpeciesDisplayName(i, buf, sizeof(buf));
+        if (buf[0] == '\0')
+            snprintf(buf, sizeof(buf), "Species %d", i);
+        sSpeciesNames.push_back(buf);
+    }
+    if (!sSpeciesNames.empty())
+        sSpeciesNamesReady = true; // otherwise retry next frame
+}
+
+static bool Pc_UiSpeciesMatches(const char *name, const char *query) {
+    if (query[0] == '\0')
+        return true;
+    {
+        std::string a(name);
+        std::string b(query);
+        for (size_t i = 0; i < a.size(); i++)
+            a[i] = (char)std::tolower((unsigned char)a[i]);
+        for (size_t i = 0; i < b.size(); i++)
+            b[i] = (char)std::tolower((unsigned char)b[i]);
+        return a.find(b) != std::string::npos;
+    }
+}
+
+static void Pc_UiCheatsWindow(void) {
+    static int sMoneyInput = 0;
+    static int sSavingsInput = 0;
+    static int sItemSel = 0;
+    static int sItemQty = 1;
+    static char sLastMsg[128] = "";
+
+    ImGui::SetNextWindowSize(ImVec2(430, 480), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Cheats", &gCheatsOpen)) {
+        ImGui::End();
+        return;
+    }
+
+    if (!Pc_CheatTeamReady()) {
+        ImGui::TextDisabled("Team data isn't loaded yet.\nStart a game / load a save first.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("Cheats apply immediately; money/items/recruits persist\non the next in-game save.");
+    ImGui::Separator();
+
+    if (ImGui::CollapsingHeader("Team")) {
+        if (ImGui::InputInt("Money", &sMoneyInput))
+            Pc_CheatSetMoney(sMoneyInput);
+        sMoneyInput = (int)Pc_CheatGetMoney();
+        if (ImGui::InputInt("Bank savings", &sSavingsInput))
+            Pc_CheatSetSavings(sSavingsInput);
+        sSavingsInput = (int)Pc_CheatGetSavings();
+        if (ImGui::Button("Max Money"))
+            Pc_CheatSetMoney(99999);
+        ImGui::SameLine();
+        if (ImGui::Button("Max Savings"))
+            Pc_CheatSetSavings(9999999);
+
+        ImGui::Separator();
+        {
+            static int sRankSel = 6;
+            int curRank = Pc_CheatGetTeamRank();
+            if (sRankSel != curRank)
+                sRankSel = curRank; // keep the combo preview in sync with reality
+            if (ImGui::Combo("Rank", &sRankSel, kTeamRankNames, 7))
+                Pc_CheatSetTeamRank(sRankSel);
+            ImGui::SameLine();
+            ImGui::TextDisabled("current: %s (%d pts)",
+                                kTeamRankNames[curRank], Pc_CheatGetTeamRankPts());
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Give items")) {
+        ImGui::Combo("Item", &sItemSel, kCheatItemNames, (int)CHEAT_ITEM_COUNT);
+        if (ImGui::InputInt("Quantity", &sItemQty)) {
+            if (sItemQty < 1)
+                sItemQty = 1;
+            if (sItemQty > 99)
+                sItemQty = 99;
+        }
+        if (ImGui::Button("Give")) {
+            int added = Pc_CheatGiveItem(kCheatItemIds[sItemSel], sItemQty);
+            snprintf(sLastMsg, sizeof(sLastMsg), "Added %d of %d requested.", added, sItemQty);
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(sLastMsg);
+    }
+
+    if (ImGui::CollapsingHeader("Dungeon")) {
+        if (!Pc_CheatInDungeon()) {
+            ImGui::TextDisabled("Enter a dungeon to use these.");
+        } else {
+            if (ImGui::Button("Heal team (HP + belly)"))
+                Pc_CheatHealTeam();
+            ImGui::SameLine();
+            ImGui::Checkbox("Invincible leader", &gCheatInvincible);
+
+            ImGui::Checkbox("Instant kill (enemies at 1 HP)", &gCheatInstantKill);
+            ImGui::Checkbox("Boost enemy EXP (1.5x)", &gCheatExpBoost);
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Leveling");
+            {
+                static int sLevelAmount = 1;
+                if (ImGui::InputInt("Levels", &sLevelAmount)) {
+                    if (sLevelAmount < 1)
+                        sLevelAmount = 1;
+                    if (sLevelAmount > 99)
+                        sLevelAmount = 99;
+                }
+                if (ImGui::Button("Level up team"))
+                    Pc_CheatLevelUpTeam(sLevelAmount);
+                ImGui::SameLine();
+                if (ImGui::Button("Max level (100)"))
+                    Pc_CheatLevelUpTeam(100);
+            }
+            {
+                static int sExpAmount = 500;
+                if (ImGui::InputInt("EXP", &sExpAmount)) {
+                    if (sExpAmount < 1)
+                        sExpAmount = 1;
+                    if (sExpAmount > 99999)
+                        sExpAmount = 99999;
+                }
+                if (ImGui::Button("Give EXP to team"))
+                    Pc_CheatGiveExpToTeam(sExpAmount);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Recruit")) {
+        if (!sSpeciesNamesReady)
+            Pc_UiBuildSpeciesNames();
+
+        if (ImGui::InputText("Search", sRecruitSearch, sizeof(sRecruitSearch)))
+            sRecruitPage = 0;
+        ImGui::TextDisabled("Case-insensitive substring match; Recruit adds the species.");
+
+        {
+            std::vector<int> matches;
+            int total;
+            int pageCount;
+            int start, end;
+            int i;
+
+            for (i = 0; i < (int)sSpeciesNames.size(); i++) {
+                if (Pc_UiSpeciesMatches(sSpeciesNames[i].c_str(), sRecruitSearch))
+                    matches.push_back(i + 1); // species id = index + 1
+            }
+            total = (int)matches.size();
+            pageCount = (total + 14) / 15; // 15 rows per page
+            if (pageCount < 1)
+                pageCount = 1;
+            if (sRecruitPage >= pageCount)
+                sRecruitPage = pageCount - 1;
+            start = sRecruitPage * 15;
+            end = start + 15;
+            if (end > total)
+                end = total;
+
+            if (ImGui::BeginTable("recruit_table", 3,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("Dex", ImGuiTableColumnFlags_WidthFixed, 46.0f);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 68.0f);
+                ImGui::TableHeadersRow();
+                for (i = start; i < end; i++) {
+                    int species = matches[i];
+                    char lbl[32];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("%d", species);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(sSpeciesNames[species - 1].c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    snprintf(lbl, sizeof(lbl), "Recruit##%d", species);
+                    if (ImGui::SmallButton(lbl)) {
+                        int ok = Pc_CheatRecruitSpecies(species);
+                        snprintf(sRecruitMsg, sizeof(sRecruitMsg),
+                                 ok ? "Recruited %s!" : "Failed (team / friend area full).",
+                                 sSpeciesNames[species - 1].c_str());
+                    }
+                }
+                ImGui::EndTable();
+            }
+
+            if (ImGui::Button("Prev") && sRecruitPage > 0)
+                sRecruitPage--;
+            ImGui::SameLine();
+            ImGui::Text("Page %d / %d (%d match%s)", sRecruitPage + 1, pageCount, total,
+                        total == 1 ? "" : "es");
+            ImGui::SameLine();
+            if (ImGui::Button("Next") && sRecruitPage < pageCount - 1)
+                sRecruitPage++;
+            ImGui::TextUnformatted(sRecruitMsg);
+        }
+    }
+
+    ImGui::End();
+}
+
 static void Pc_UiSettingsWindow(void) {
     ImGui::SetNextWindowSize(ImVec2(640, 560), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Settings", &gSettingsOpen)) {
@@ -579,15 +836,28 @@ extern "C" void Pc_UiRender(void) {
                 Pc_RequestQuit();
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Render")) {
-            ImGui::Selectable("Placeholder");
+        if (ImGui::BeginMenu("Cheats")) {
+            if (ImGui::Selectable("Open Cheats"))
+                gCheatsOpen = true;
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
     }
 
+    // The continuous toggles keep working even while the Cheats window is
+    // closed (they run once per logic frame, after the game tick).
+    if (gCheatInvincible && Pc_CheatInDungeon())
+        Pc_CheatInvincibleLeaderTick();
+    if (gCheatInstantKill && Pc_CheatInDungeon())
+        Pc_CheatInstantKillTick();
+    if (gCheatExpBoost && Pc_CheatInDungeon())
+        Pc_CheatExpBoostTick();
+
     if (gSettingsOpen)
         Pc_UiSettingsWindow();
+
+    if (gCheatsOpen)
+        Pc_UiCheatsWindow();
 
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(

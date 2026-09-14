@@ -56,7 +56,13 @@ static bool gSettingsOpen = false;
 static bool gCheatsOpen = false;      // Cheats window visibility
 static bool gCheatInvincible = false; // continuously top-up leader HP in dungeon
 static bool gCheatInstantKill = false; // enemies at 1 HP each frame
-static bool gCheatExpBoost = false;    // enemies give 1.5x EXP each frame
+static bool gCheatExpMultEnabled = false; // custom XP multiplier toggle
+static float sCheatExpMult = 2.0f;       // whole-team XP multiplier (1.0 = off)
+static bool gCheatSkipToEnd = false;   // on stairs, floor = last floor
+static bool gCheatApplyAbilities = false;   // apply custom abilities to recruited mon
+static int  gCheatLastRecruitSpecies = 0;   // species id of last custom recruit
+static int  gCheatLastAbility1 = -1;        // ability ids for the last custom recruit
+static int  gCheatLastAbility2 = -1;
 static int  gCaptureAction = -1; // action awaiting a key press, or -1
 
 extern "C" void Pc_UiInit(void) {
@@ -94,7 +100,12 @@ extern "C" void Pc_UiShutdown(void) {
     gCheatsOpen = false;
     gCheatInvincible = false;
     gCheatInstantKill = false;
-    gCheatExpBoost = false;
+    gCheatExpMultEnabled = false;
+    gCheatSkipToEnd = false;
+    gCheatApplyAbilities = false;
+    gCheatLastRecruitSpecies = 0;
+    gCheatLastAbility1 = -1;
+    gCheatLastAbility2 = -1;
     gCaptureAction = -1;
 }
 
@@ -126,6 +137,10 @@ extern "C" void Pc_UiProcessEvent(const void *sdlEvent) {
         } else if (ev->key.repeat == 0 &&
                    ev->key.keysym.scancode == SDL_SCANCODE_F1) {
             gMenuVisible = !gMenuVisible;
+            if (!gMenuVisible) { // hiding the UI also closes any open windows
+                gSettingsOpen = false;
+                gCheatsOpen = false;
+            }
         }
     }
 
@@ -134,6 +149,10 @@ extern "C" void Pc_UiProcessEvent(const void *sdlEvent) {
 
 extern "C" void Pc_UiToggle(void) {
     gMenuVisible = !gMenuVisible;
+    if (!gMenuVisible) { // hiding the UI also closes any open windows
+        gSettingsOpen = false;
+        gCheatsOpen = false;
+    }
 }
 
 static void Pc_UiControlsTab(void) {
@@ -564,6 +583,23 @@ static char sRecruitSearch[64] = "";
 static int  sRecruitPage = 0;
 static char sRecruitMsg[128] = "";
 
+// Recruit customization state (move/ability pickers, level, stats, etc).
+static std::vector<std::string> sMoveNames;    // index = move id
+static bool sMoveNamesReady = false;
+static std::vector<std::string> sAbilityNames; // index = ability id
+static bool sAbilityNamesReady = false;
+static std::vector<const char *> sItemPickNames; // "(none)" + kCheatItemNames
+static bool sItemPickNamesReady = false;
+
+static int  sRecruitLevel = 1;
+static char sRecruitName[16] = "";
+static int  sRecruitIq = 0;
+static int  sRecruitItem = 0;         // index into sItemPickNames (0 = none)
+static int  sRecruitMoves[4] = { 0, 0, 0, 0 };
+static char sMoveSearch[4][40] = {};
+static int  sRecruitHp = 0, sRecruitAtk = 0, sRecruitSpAtk = 0, sRecruitDef = 0, sRecruitSpDef = 0; // 0 = auto
+static int  sRecruitAbility1 = -1, sRecruitAbility2 = -1; // -1 = species default
+
 static void Pc_UiBuildSpeciesNames(void) {
     int count = Pc_CheatSpeciesCount();
     int i;
@@ -595,6 +631,107 @@ static bool Pc_UiSpeciesMatches(const char *name, const char *query) {
     }
 }
 
+static void Pc_UiBuildMoveNames(void) {
+    int count = Pc_CheatMoveCount();
+    int i;
+
+    sMoveNames.clear();
+    sMoveNames.reserve((size_t)count);
+    for (i = 0; i < count; i++) {
+        char buf[64];
+        if (i == 0) {
+            sMoveNames.push_back("(none)");
+        } else {
+            Pc_CheatMoveDisplayName(i, buf, sizeof(buf));
+            if (buf[0] == '\0')
+                snprintf(buf, sizeof(buf), "Move %d", i);
+            sMoveNames.push_back(buf);
+        }
+    }
+    if (!sMoveNames.empty())
+        sMoveNamesReady = true; // otherwise retry next frame
+}
+
+static void Pc_UiBuildAbilityNames(void) {
+    int count = Pc_CheatAbilityCount();
+    int i;
+
+    sAbilityNames.clear();
+    sAbilityNames.reserve((size_t)count);
+    for (i = 0; i < count; i++) {
+        char buf[64];
+        Pc_CheatAbilityDisplayName(i, buf, sizeof(buf));
+        if (buf[0] == '\0')
+            snprintf(buf, sizeof(buf), "Ability %d", i);
+        sAbilityNames.push_back(buf);
+    }
+    if (!sAbilityNames.empty())
+        sAbilityNamesReady = true; // otherwise retry next frame
+}
+
+static void Pc_UiBuildItemPickNames(void) {
+    int i;
+
+    sItemPickNames.clear();
+    sItemPickNames.push_back("(none)");
+    for (i = 0; i < (int)CHEAT_ITEM_COUNT; i++)
+        sItemPickNames.push_back(kCheatItemNames[i]);
+    sItemPickNamesReady = true;
+}
+
+// Searchable move picker. `search` is a per-picker buffer so each slot keeps
+// its own filter.
+static bool Pc_UiMovePicker(const char *label, int *moveId, char *search, size_t searchCap) {
+    const char *preview;
+    bool changed = false;
+    int m;
+
+    preview = (*moveId >= 0 && *moveId < (int)sMoveNames.size())
+                  ? sMoveNames[*moveId].c_str()
+                  : "(none)";
+
+    if (ImGui::BeginCombo(label, preview, ImGuiComboFlags_HeightLargest)) {
+        ImGui::InputText("Search", search, searchCap);
+        ImGui::BeginChild("##list", ImVec2(0.0f, 220.0f), true);
+        for (m = 1; m < (int)sMoveNames.size(); m++) {
+            if (search[0] != '\0' && !Pc_UiSpeciesMatches(sMoveNames[m].c_str(), search))
+                continue;
+            if (ImGui::Selectable(sMoveNames[m].c_str(), *moveId == m)) {
+                *moveId = m;
+                changed = true;
+            }
+        }
+        ImGui::EndChild();
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+static bool Pc_UiAbilityPicker(const char *label, int *abilityId) {
+    const char *preview;
+    bool changed = false;
+    int a;
+
+    preview = (*abilityId >= 0 && *abilityId < (int)sAbilityNames.size())
+                  ? sAbilityNames[*abilityId].c_str()
+                  : "(species default)";
+
+    if (ImGui::BeginCombo(label, preview, ImGuiComboFlags_HeightLargest)) {
+        if (ImGui::Selectable("(species default)", *abilityId < 0)) {
+            *abilityId = -1;
+            changed = true;
+        }
+        for (a = 0; a < (int)sAbilityNames.size(); a++) {
+            if (ImGui::Selectable(sAbilityNames[a].c_str(), *abilityId == a)) {
+                *abilityId = a;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
 static void Pc_UiCheatsWindow(void) {
     static int sMoneyInput = 0;
     static int sSavingsInput = 0;
@@ -618,6 +755,7 @@ static void Pc_UiCheatsWindow(void) {
     ImGui::Separator();
 
     if (ImGui::CollapsingHeader("Team")) {
+        ImGui::Indent();
         if (ImGui::InputInt("Money", &sMoneyInput))
             Pc_CheatSetMoney(sMoneyInput);
         sMoneyInput = (int)Pc_CheatGetMoney();
@@ -642,9 +780,24 @@ static void Pc_UiCheatsWindow(void) {
             ImGui::TextDisabled("current: %s (%d pts)",
                                 kTeamRankNames[curRank], Pc_CheatGetTeamRankPts());
         }
+        ImGui::Unindent();
+    }
+
+    if (ImGui::CollapsingHeader("Unlocks")) {
+        ImGui::Indent();
+        if (ImGui::Button("Unlock all friend areas"))
+            Pc_CheatUnlockAllFriendAreas();
+        ImGui::SameLine();
+        if (ImGui::Button("Unlock all dungeons"))
+            Pc_CheatUnlockAllDungeons();
+        ImGui::Separator();
+        ImGui::Checkbox("Stairs skip to end of dungeon", &gCheatSkipToEnd);
+        ImGui::TextDisabled("While on a stairs tile the floor becomes the last floor,\nso taking the stairs clears the dungeon.");
+        ImGui::Unindent();
     }
 
     if (ImGui::CollapsingHeader("Give items")) {
+        ImGui::Indent();
         ImGui::Combo("Item", &sItemSel, kCheatItemNames, (int)CHEAT_ITEM_COUNT);
         if (ImGui::InputInt("Quantity", &sItemQty)) {
             if (sItemQty < 1)
@@ -658,9 +811,11 @@ static void Pc_UiCheatsWindow(void) {
         }
         ImGui::SameLine();
         ImGui::TextUnformatted(sLastMsg);
+        ImGui::Unindent();
     }
 
     if (ImGui::CollapsingHeader("Dungeon")) {
+        ImGui::Indent();
         if (!Pc_CheatInDungeon()) {
             ImGui::TextDisabled("Enter a dungeon to use these.");
         } else {
@@ -670,7 +825,16 @@ static void Pc_UiCheatsWindow(void) {
             ImGui::Checkbox("Invincible leader", &gCheatInvincible);
 
             ImGui::Checkbox("Instant kill (enemies at 1 HP)", &gCheatInstantKill);
-            ImGui::Checkbox("Boost enemy EXP (1.5x)", &gCheatExpBoost);
+
+            ImGui::Checkbox("Custom XP multiplier", &gCheatExpMultEnabled);
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::InputFloat("XP x", &sCheatExpMult, 0.1f, 1.0f, "%.1f")) {
+                if (sCheatExpMult < 1.0f)
+                    sCheatExpMult = 1.0f;
+                if (sCheatExpMult > 100.0f)
+                    sCheatExpMult = 100.0f;
+            }
+            ImGui::TextDisabled("Whole team in dungeons; 1.0 = normal, 2.0 = double.");
 
             ImGui::Separator();
             ImGui::TextUnformatted("Leveling");
@@ -700,11 +864,90 @@ static void Pc_UiCheatsWindow(void) {
                     Pc_CheatGiveExpToTeam(sExpAmount);
             }
         }
+        ImGui::Unindent();
     }
 
     if (ImGui::CollapsingHeader("Recruit")) {
+        ImGui::Indent();
         if (!sSpeciesNamesReady)
             Pc_UiBuildSpeciesNames();
+        if (!sMoveNamesReady)
+            Pc_UiBuildMoveNames();
+        if (!sAbilityNamesReady)
+            Pc_UiBuildAbilityNames();
+        if (!sItemPickNamesReady)
+            Pc_UiBuildItemPickNames();
+
+        if (ImGui::CollapsingHeader("Customize")) {
+            ImGui::Indent();
+            if (ImGui::InputInt("Level", &sRecruitLevel)) {
+                if (sRecruitLevel < 1)
+                    sRecruitLevel = 1;
+                if (sRecruitLevel > 100)
+                    sRecruitLevel = 100;
+            }
+            ImGui::InputText("Name", sRecruitName, sizeof(sRecruitName));
+            if (ImGui::InputInt("IQ", &sRecruitIq)) {
+                if (sRecruitIq < 0)
+                    sRecruitIq = 0;
+                if (sRecruitIq > 999)
+                    sRecruitIq = 999;
+            }
+            ImGui::Combo("Held item", &sRecruitItem, sItemPickNames.data(),
+                         (int)sItemPickNames.size());
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Moves (empty = species default)");
+            {
+                char moveLabel[24];
+                int slot;
+                for (slot = 0; slot < 4; slot++) {
+                    snprintf(moveLabel, sizeof(moveLabel), "Move %d", slot + 1);
+                    Pc_UiMovePicker(moveLabel, &sRecruitMoves[slot],
+                                    sMoveSearch[slot], sizeof(sMoveSearch[slot]));
+                }
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Stats (0 = auto from level)");
+            if (ImGui::InputInt("HP", &sRecruitHp)) {
+                if (sRecruitHp < 0)
+                    sRecruitHp = 0;
+                if (sRecruitHp > 999)
+                    sRecruitHp = 999;
+            }
+            if (ImGui::InputInt("Attack", &sRecruitAtk)) {
+                if (sRecruitAtk < 0)
+                    sRecruitAtk = 0;
+                if (sRecruitAtk > 255)
+                    sRecruitAtk = 255;
+            }
+            if (ImGui::InputInt("Sp. Attack", &sRecruitSpAtk)) {
+                if (sRecruitSpAtk < 0)
+                    sRecruitSpAtk = 0;
+                if (sRecruitSpAtk > 255)
+                    sRecruitSpAtk = 255;
+            }
+            if (ImGui::InputInt("Defense", &sRecruitDef)) {
+                if (sRecruitDef < 0)
+                    sRecruitDef = 0;
+                if (sRecruitDef > 255)
+                    sRecruitDef = 255;
+            }
+            if (ImGui::InputInt("Sp. Defense", &sRecruitSpDef)) {
+                if (sRecruitSpDef < 0)
+                    sRecruitSpDef = 0;
+                if (sRecruitSpDef > 255)
+                    sRecruitSpDef = 255;
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Abilities (the game doesn't save abilities on a Pokemon,\nso these apply while the mon is on the team in a dungeon)");
+            Pc_UiAbilityPicker("Ability 1", &sRecruitAbility1);
+            Pc_UiAbilityPicker("Ability 2", &sRecruitAbility2);
+            ImGui::Checkbox("Apply these abilities in dungeons", &gCheatApplyAbilities);
+            ImGui::Unindent();
+        }
 
         if (ImGui::InputText("Search", sRecruitSearch, sizeof(sRecruitSearch)))
             sRecruitPage = 0;
@@ -749,7 +992,31 @@ static void Pc_UiCheatsWindow(void) {
                     ImGui::TableSetColumnIndex(2);
                     snprintf(lbl, sizeof(lbl), "Recruit##%d", species);
                     if (ImGui::SmallButton(lbl)) {
-                        int ok = Pc_CheatRecruitSpecies(species);
+                        PcCheatMonSpec spec;
+                        int ok;
+                        memset(&spec, 0, sizeof(spec));
+                        spec.species = species;
+                        spec.level = sRecruitLevel;
+                        spec.moves[0] = (u16)sRecruitMoves[0];
+                        spec.moves[1] = (u16)sRecruitMoves[1];
+                        spec.moves[2] = (u16)sRecruitMoves[2];
+                        spec.moves[3] = (u16)sRecruitMoves[3];
+                        spec.heldItem = sRecruitItem > 0 ? kCheatItemIds[sRecruitItem - 1] : 0;
+                        spec.iq = sRecruitIq;
+                        spec.hp = sRecruitHp;
+                        spec.atk = sRecruitAtk;
+                        spec.spAtk = sRecruitSpAtk;
+                        spec.def = sRecruitDef;
+                        spec.spDef = sRecruitSpDef;
+                        spec.name = sRecruitName[0] != '\0' ? sRecruitName : NULL;
+                        spec.ability1 = sRecruitAbility1;
+                        spec.ability2 = sRecruitAbility2;
+                        ok = Pc_CheatRecruitMon(&spec);
+                        if (ok) {
+                            gCheatLastRecruitSpecies = species;
+                            gCheatLastAbility1 = sRecruitAbility1;
+                            gCheatLastAbility2 = sRecruitAbility2;
+                        }
                         snprintf(sRecruitMsg, sizeof(sRecruitMsg),
                                  ok ? "Recruited %s!" : "Failed (team / friend area full).",
                                  sSpeciesNames[species - 1].c_str());
@@ -768,6 +1035,7 @@ static void Pc_UiCheatsWindow(void) {
                 sRecruitPage++;
             ImGui::TextUnformatted(sRecruitMsg);
         }
+        ImGui::Unindent();
     }
 
     ImGui::End();
@@ -850,8 +1118,13 @@ extern "C" void Pc_UiRender(void) {
         Pc_CheatInvincibleLeaderTick();
     if (gCheatInstantKill && Pc_CheatInDungeon())
         Pc_CheatInstantKillTick();
-    if (gCheatExpBoost && Pc_CheatInDungeon())
-        Pc_CheatExpBoostTick();
+    if (gCheatExpMultEnabled && sCheatExpMult != 1.0f && Pc_CheatInDungeon())
+        Pc_CheatExpMultiplierTick(sCheatExpMult);
+    if (gCheatSkipToEnd && Pc_CheatInDungeon())
+        Pc_CheatSkipToEndTick();
+    if (gCheatApplyAbilities && gCheatLastRecruitSpecies > 0)
+        Pc_CheatApplyAbilitiesTick(gCheatLastRecruitSpecies,
+                                   gCheatLastAbility1, gCheatLastAbility2);
 
     if (gSettingsOpen)
         Pc_UiSettingsWindow();

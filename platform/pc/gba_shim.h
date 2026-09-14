@@ -95,6 +95,22 @@ void Pc_AudioTopUp(int targetSamples);     // keep the SDL queue above a cushion
 // ---- Cheats (cheats_pc.c real / cheats_stub.c empty) ----
 // Game-state helpers for the ImGui Cheats window. The real implementations
 // are linked only into pmd-red-game; the smoke binary links empty stubs.
+typedef struct PcCheatMonSpec {
+    int species;
+    int level;       // 1..100
+    u16 moves[4];    // move ids (0 = empty slot)
+    int heldItem;    // item id (0 = none)
+    int iq;
+    int hp;          // 0 = auto from level
+    int atk;
+    int spAtk;
+    int def;
+    int spDef;
+    const char *name; // NULL = species default
+    int ability1;    // -1 = species default (applied to in-dungeon entity)
+    int ability2;    // -1 = species default
+} PcCheatMonSpec;
+
 int  Pc_CheatTeamReady(void);                    // team/save state is live
 s32  Pc_CheatGetMoney(void);
 void Pc_CheatSetMoney(s32 value);                // clamped to MAX_TEAM_MONEY
@@ -105,16 +121,26 @@ int  Pc_CheatInDungeon(void);                    // leader present in a dungeon
 void Pc_CheatHealTeam(void);                     // full HP + belly for the team
 void Pc_CheatInvincibleLeaderTick(void);         // leader HP = maxHP (per frame)
 int  Pc_CheatRecruitSpecies(int species);        // unlock friend area + add lvl-1 mon
+int  Pc_CheatRecruitMon(const PcCheatMonSpec *spec); // custom recruit (level/moves/item/name/stats)
+void Pc_CheatApplyAbilitiesTick(int species, int ability1, int ability2); // in-dungeon override
 const char *Pc_CheatSpeciesName(int species);    // species display name
 int  Pc_CheatSpeciesCount(void);                 // NUM_MONSTERS
 void Pc_CheatSpeciesDisplayName(int species, char *out, size_t cap); // charmapped name -> ASCII
+int  Pc_CheatMoveCount(void);                    // number of move ids
+void Pc_CheatMoveDisplayName(int moveId, char *out, size_t cap);    // charmapped move -> ASCII
+int  Pc_CheatAbilityCount(void);                 // NUM_ABILITIES
+void Pc_CheatAbilityDisplayName(int abilityId, char *out, size_t cap); // charmapped ability -> ASCII
 int  Pc_CheatGetTeamRank(void);                  // 0..MAX_TEAM_RANKS-1
 s32  Pc_CheatGetTeamRankPts(void);
 void Pc_CheatSetTeamRank(int rank);              // Normal..Lucario
 void Pc_CheatLevelUpTeam(int levels);            // in-dungeon, all team members
 void Pc_CheatGiveExpToTeam(int exp);             // in-dungeon, all team members
 void Pc_CheatExpBoostTick(void);                 // mark enemies 1.5x EXP (per frame)
+void Pc_CheatExpMultiplierTick(float multiplier); // custom whole-team XP multiplier (1.0 = off)
 void Pc_CheatInstantKillTick(void);              // enemies at 1 HP (per frame)
+void Pc_CheatUnlockAllFriendAreas(void);         // buy every friend area
+void Pc_CheatUnlockAllDungeons(void);            // mark every dungeon available
+void Pc_CheatSkipToEndTick(void);                // on stairs, floor = last floor
 
 // ---- Save backend (save_pc.c) ----
 void Pc_SaveInit(const char *dir); // host save dir (default: exe dir / cwd)

@@ -11,6 +11,9 @@ void Pc_CheatSetMoney(s32 value) { (void)value; }
 s32 Pc_CheatGetSavings(void) { return 0; }
 void Pc_CheatSetSavings(s32 value) { (void)value; }
 int Pc_CheatGiveItem(int itemId, int quantity) { (void)itemId; (void)quantity; return 0; }
+int Pc_CheatItemCount(void) { return 0; }
+void Pc_CheatItemDisplayName(int itemId, char *out, size_t cap) { (void)itemId; (void)cap; if (out != NULL) out[0] = '\0'; }
+void Pc_CheatItemDescription(int itemId, char *out, size_t cap) { (void)itemId; (void)cap; if (out != NULL) out[0] = '\0'; }
 int Pc_CheatInDungeon(void) { return 0; }
 void Pc_CheatHealTeam(void) {}
 void Pc_CheatInvincibleLeaderTick(void) {}

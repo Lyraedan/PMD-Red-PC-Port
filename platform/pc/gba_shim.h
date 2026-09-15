@@ -117,6 +117,9 @@ void Pc_CheatSetMoney(s32 value);                // clamped to MAX_TEAM_MONEY
 s32  Pc_CheatGetSavings(void);
 void Pc_CheatSetSavings(s32 value);              // clamped to MAX_TEAM_SAVINGS
 int  Pc_CheatGiveItem(int itemId, int quantity); // items actually added
+int  Pc_CheatItemCount(void);                    // NUMBER_OF_ITEM_IDS
+void Pc_CheatItemDisplayName(int itemId, char *out, size_t cap); // charmapped item name -> ASCII
+void Pc_CheatItemDescription(int itemId, char *out, size_t cap); // charmapped item desc -> ASCII
 int  Pc_CheatInDungeon(void);                    // leader present in a dungeon
 void Pc_CheatHealTeam(void);                     // full HP + belly for the team
 void Pc_CheatInvincibleLeaderTick(void);         // leader HP = maxHP (per frame)

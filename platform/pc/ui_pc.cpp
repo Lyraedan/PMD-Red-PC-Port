@@ -552,28 +552,20 @@ static void Pc_UiGraphicsTab(void) {
     ImGui::TextDisabled("Most changes apply immediately.");
 }
 
-// Cheat item quick list for the Give items combo. The in-game item table is
-// charmapped, so plain-ASCII names are listed here (ids from constants/item.h).
-static const int kCheatItemIds[] = {
-    ITEM_REVIVER_SEED, ITEM_ORAN_BERRY, ITEM_SITRUS_BERRY, ITEM_MAX_ELIXIR,
-    ITEM_APPLE, ITEM_BIG_APPLE, ITEM_HUNGER_SEED, ITEM_PLAIN_SEED,
-    ITEM_ESCAPE_ORB, ITEM_PETRIFY_ORB, ITEM_TRAWL_ORB, ITEM_REVIVER_ORB,
-    ITEM_X_RAY_SPECS, ITEM_PECHA_SCARF, ITEM_WARP_SCARF, ITEM_FRIEND_BOW,
-    ITEM_JOY_SEED, ITEM_GOLD_RIBBON,
-};
-static const char *const kCheatItemNames[] = {
-    "Reviver Seed", "Oran Berry", "Sitrus Berry", "Max Elixir",
-    "Apple", "Big Apple", "Hunger Seed", "Plain Seed",
-    "Escape Orb", "Petrify Orb", "Trawl Orb", "Reviver Orb",
-    "X-Ray Specs", "Pecha Scarf", "Warp Scarf", "Friend Bow",
-    "Joy Seed", "Gold Ribbon",
-};
-#define CHEAT_ITEM_COUNT (sizeof(kCheatItemIds) / sizeof(kCheatItemIds[0]))
-
 // Rescue-team ranks, indexed by GetRescueTeamRank() (rescue_team_info.h).
 static const char *const kTeamRankNames[] = {
     "Normal", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Lucario"
 };
+
+// Give-items list state: every item name/description (decoded to ASCII), a
+// case-insensitive search filter and a page index over the results.
+static std::vector<std::string> sItemNames;  // display names, index = item id
+static std::vector<std::string> sItemDescs;  // descriptions, index = item id
+static bool sItemNamesReady = false;
+static std::vector<int> sItemQty;            // per-row give amount, index = item id
+static char sItemSearch[64] = "";
+static int  sItemPage = 0;
+static char sItemMsg[128] = "";
 
 // Recruit list state: all species names (decoded to ASCII), a case-insensitive
 // search filter and a page index over the filtered results.
@@ -588,13 +580,13 @@ static std::vector<std::string> sMoveNames;    // index = move id
 static bool sMoveNamesReady = false;
 static std::vector<std::string> sAbilityNames; // index = ability id
 static bool sAbilityNamesReady = false;
-static std::vector<const char *> sItemPickNames; // "(none)" + kCheatItemNames
+static std::vector<const char *> sItemPickNames; // "(none)" + every item name
 static bool sItemPickNamesReady = false;
 
 static int  sRecruitLevel = 1;
 static char sRecruitName[16] = "";
 static int  sRecruitIq = 0;
-static int  sRecruitItem = 0;         // index into sItemPickNames (0 = none)
+static int  sRecruitItem = 0;         // item id (0 = none)
 static int  sRecruitMoves[4] = { 0, 0, 0, 0 };
 static char sMoveSearch[4][40] = {};
 static int  sRecruitHp = 0, sRecruitAtk = 0, sRecruitSpAtk = 0, sRecruitDef = 0, sRecruitSpDef = 0; // 0 = auto
@@ -669,13 +661,42 @@ static void Pc_UiBuildAbilityNames(void) {
         sAbilityNamesReady = true; // otherwise retry next frame
 }
 
+static void Pc_UiBuildItemNames(void) {
+    int count = Pc_CheatItemCount();
+    int i;
+
+    sItemNames.clear();
+    sItemNames.reserve((size_t)count);
+    sItemDescs.clear();
+    sItemDescs.reserve((size_t)count);
+    sItemQty.assign((size_t)count, 1);
+    for (i = 0; i < count; i++) {
+        char nb[64];
+        char db[512];
+        if (i == 0) {
+            sItemNames.push_back("(nothing)");
+            sItemDescs.push_back("");
+        } else {
+            Pc_CheatItemDisplayName(i, nb, sizeof(nb));
+            if (nb[0] == '\0')
+                snprintf(nb, sizeof(nb), "Item %d", i);
+            Pc_CheatItemDescription(i, db, sizeof(db));
+            sItemNames.push_back(nb);
+            sItemDescs.push_back(db);
+        }
+    }
+    sItemNamesReady = true;
+}
+
 static void Pc_UiBuildItemPickNames(void) {
     int i;
 
+    if (!sItemNamesReady)
+        Pc_UiBuildItemNames(); // recruit held-item combo needs the decoded names
     sItemPickNames.clear();
     sItemPickNames.push_back("(none)");
-    for (i = 0; i < (int)CHEAT_ITEM_COUNT; i++)
-        sItemPickNames.push_back(kCheatItemNames[i]);
+    for (i = 1; i < (int)sItemNames.size(); i++)
+        sItemPickNames.push_back(sItemNames[i].c_str());
     sItemPickNamesReady = true;
 }
 
@@ -735,11 +756,8 @@ static bool Pc_UiAbilityPicker(const char *label, int *abilityId) {
 static void Pc_UiCheatsWindow(void) {
     static int sMoneyInput = 0;
     static int sSavingsInput = 0;
-    static int sItemSel = 0;
-    static int sItemQty = 1;
-    static char sLastMsg[128] = "";
 
-    ImGui::SetNextWindowSize(ImVec2(430, 480), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(560, 540), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Cheats", &gCheatsOpen)) {
         ImGui::End();
         return;
@@ -798,19 +816,89 @@ static void Pc_UiCheatsWindow(void) {
 
     if (ImGui::CollapsingHeader("Give items")) {
         ImGui::Indent();
-        ImGui::Combo("Item", &sItemSel, kCheatItemNames, (int)CHEAT_ITEM_COUNT);
-        if (ImGui::InputInt("Quantity", &sItemQty)) {
-            if (sItemQty < 1)
-                sItemQty = 1;
-            if (sItemQty > 99)
-                sItemQty = 99;
+        if (!sItemNamesReady)
+            Pc_UiBuildItemNames();
+
+        if (ImGui::InputText("Search##items", sItemSearch, sizeof(sItemSearch)))
+            sItemPage = 0;
+        ImGui::TextDisabled("Search by name; Give adds the amount to the team bag.");
+
+        {
+            std::vector<int> matches;
+            int total;
+            int pageCount;
+            int start, end;
+            int i;
+
+            for (i = 1; i < (int)sItemNames.size(); i++) {
+                if (Pc_UiSpeciesMatches(sItemNames[i].c_str(), sItemSearch))
+                    matches.push_back(i); // item id = index
+            }
+            total = (int)matches.size();
+            pageCount = (total + 14) / 15; // 15 rows per page
+            if (pageCount < 1)
+                pageCount = 1;
+            if (sItemPage >= pageCount)
+                sItemPage = pageCount - 1;
+            start = sItemPage * 15;
+            end = start + 15;
+            if (end > total)
+                end = total;
+
+            if (ImGui::BeginTable("give_table", 5,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 34.0f);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Qty", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+                ImGui::TableHeadersRow();
+                for (i = start; i < end; i++) {
+                    int id = matches[i];
+                    char lbl[32];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("%d", id);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(sItemNames[id].c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    {
+                        const char *d = sItemDescs[id].c_str();
+                        ImGui::TextUnformatted(d);
+                        if (ImGui::IsItemHovered() && d[0] != '\0')
+                            ImGui::SetTooltip("%s", d);
+                    }
+                    ImGui::TableSetColumnIndex(3);
+                    snprintf(lbl, sizeof(lbl), "##qty_%d", id);
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::InputInt(lbl, &sItemQty[id], 0, 0)) {
+                        if (sItemQty[id] < 1)
+                            sItemQty[id] = 1;
+                        if (sItemQty[id] > 99)
+                            sItemQty[id] = 99;
+                    }
+                    ImGui::TableSetColumnIndex(4);
+                    snprintf(lbl, sizeof(lbl), "Give##%d", id);
+                    if (ImGui::SmallButton(lbl)) {
+                        int added = Pc_CheatGiveItem(id, sItemQty[id]);
+                        snprintf(sItemMsg, sizeof(sItemMsg),
+                                 "Added %d of %d.", added, sItemQty[id]);
+                    }
+                }
+                ImGui::EndTable();
+            }
+
+            if (ImGui::Button("Prev##items") && sItemPage > 0)
+                sItemPage--;
+            ImGui::SameLine();
+            ImGui::Text("Page %d / %d (%d item%s)", sItemPage + 1, pageCount, total,
+                        total == 1 ? "" : "s");
+            ImGui::SameLine();
+            if (ImGui::Button("Next##items") && sItemPage < pageCount - 1)
+                sItemPage++;
+            if (sItemMsg[0] != '\0')
+                ImGui::TextUnformatted(sItemMsg);
         }
-        if (ImGui::Button("Give")) {
-            int added = Pc_CheatGiveItem(kCheatItemIds[sItemSel], sItemQty);
-            snprintf(sLastMsg, sizeof(sLastMsg), "Added %d of %d requested.", added, sItemQty);
-        }
-        ImGui::SameLine();
-        ImGui::TextUnformatted(sLastMsg);
         ImGui::Unindent();
     }
 
@@ -1001,7 +1089,7 @@ static void Pc_UiCheatsWindow(void) {
                         spec.moves[1] = (u16)sRecruitMoves[1];
                         spec.moves[2] = (u16)sRecruitMoves[2];
                         spec.moves[3] = (u16)sRecruitMoves[3];
-                        spec.heldItem = sRecruitItem > 0 ? kCheatItemIds[sRecruitItem - 1] : 0;
+                        spec.heldItem = sRecruitItem;
                         spec.iq = sRecruitIq;
                         spec.hp = sRecruitHp;
                         spec.atk = sRecruitAtk;

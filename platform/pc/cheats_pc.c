@@ -37,7 +37,8 @@
 
 // Decode a GBA-charmapped string to plain ASCII. Plain ASCII letters/digits
 // and '-'/' ' are single bytes; apostrophe / comma / gender symbols are
-// multi-byte or non-ASCII (see charmap.txt). Unknown bytes are skipped.
+// multi-byte or non-ASCII (see charmap.txt). Unknown bytes and icon/marker
+// runs (0x81/0x83/0x87, e.g. {ORB}) are skipped.
 static void Pc_DecodeCharmap(const u8 *src, char *out, size_t cap, int maxBytes)
 {
     size_t o = 0;
@@ -61,8 +62,10 @@ static void Pc_DecodeCharmap(const u8 *src, char *out, size_t cap, int maxBytes)
         } else if (c == 0x7E && (unsigned char)src[1] == 0x32 && (unsigned char)src[2] == 0x63) {
             out[o++] = ',';
             src += 3;
-        } else if (c == 0x7E || c == 0x81 || c == 0xBD || c == 0xBE) {
-            src++; // ~, gender symbols, or unknown multi-byte runs: skip
+        } else if (c == 0x7E || c == 0x81 || c == 0x83 || c == 0x87) {
+            src += (src[1] != '\0') ? 2 : 1; // icon/marker/multi-byte runs: skip
+        } else if (c == 0xBD || c == 0xBE) {
+            src++; // single-byte gender symbols: skip
         } else if (c >= 0x20 && c <= 0x7E) {
             out[o++] = (char)c;
             src++;
@@ -80,6 +83,56 @@ static void Pc_DecodeCharmap(const u8 *src, char *out, size_t cap, int maxBytes)
 static Entity *sExpTrackEnt[MAX_TEAM_MEMBERS];
 static s32 sExpTrackLast[MAX_TEAM_MEMBERS];
 static s32 sExpTrackBonus[MAX_TEAM_MEMBERS];
+
+// Item names/descriptions use charmapped control codes. After charmap decoding
+// these appear as '#n' (newline), '#c<color>'/'#r' (colored text), '#W' (wait),
+// '#~' (wait frames), icon runs, etc. Turn '#n' into '\n' and strip the rest.
+static void Pc_DecodeItemText(const u8 *src, char *out, size_t cap, int maxBytes)
+{
+    char tmp[512];
+    size_t o = 0;
+    size_t len;
+    size_t i = 0;
+
+    Pc_DecodeCharmap(src, tmp, sizeof(tmp), maxBytes);
+    len = strlen(tmp);
+
+    while (i < len && o + 1 < cap) {
+        char c = tmp[i];
+        if (c == '{') {
+            const char *end = strchr(tmp + i, '}');
+            if (end != NULL) {
+                if (end - (tmp + i) == 10 && strncmp(tmp + i + 1, "NEW_LINE", 8) == 0)
+                    out[o++] = '\n';
+                i = (size_t)(end - tmp) + 1;
+                continue;
+            }
+        }
+        if (c == '#') {
+            char k = (i + 1 < len) ? tmp[i + 1] : '\0';
+            if (k == 'n' || k == 'N') {
+                out[o++] = '\n';
+                i += 2; // #n
+            } else if (k == 'c' || k == 'C') {
+                i += 3; // #c<colorbyte>
+            } else if (k == 'r' || k == 'R') {
+                i += 2; // #r
+            } else if (k == '~') {
+                i += 3; // #~<frames>
+            } else if (k == '_' || k == '=') {
+                i += 4; // #_xx. / #=xx.
+            } else {
+                i += 2; // #W, #P, #>, #+, and anything unknown
+            }
+            if (i > len)
+                i = len;
+            continue;
+        }
+        out[o++] = c;
+        i++;
+    }
+    out[o] = '\0';
+}
 
 static void ApplyLevelGains(Pokemon *pokemon, s32 targetLevel)
 {
@@ -162,24 +215,95 @@ void Pc_CheatSetSavings(s32 value)
     gTeamInventoryRef->teamSavings = value;
 }
 
+static bool8 IsStackableItem(u8 id)
+{
+    switch (GetItemCategory(id)) {
+        case CATEGORY_THROWN_LINE:
+        case CATEGORY_THROWN_ARC:
+        case CATEGORY_BERRIES_SEEDS_VITAMINS:
+        case CATEGORY_FOOD_GUMMIES:
+        case CATEGORY_POKE:
+        case CATEGORY_ORBS:
+            return TRUE;
+        default:
+            return FALSE; // held items, TMs, etc. take one slot each
+    }
+}
+
 int Pc_CheatGiveItem(int itemId, int quantity)
 {
-    int added = 0;
-    int i;
+    int remaining = quantity;
+    s32 i;
+    bool8 stackable;
 
     if (gTeamInventoryRef == NULL || quantity <= 0)
         return 0;
     if (itemId <= 0 || itemId >= NUMBER_OF_ITEM_IDS)
         return 0;
 
-    for (i = 0; i < quantity; i++) {
-        if (AddItemIdToInventory((u8)itemId, FALSE))
-            added++;
-        else
-            break; // bag full
+    stackable = IsStackableItem((u8)itemId);
+
+    // Merge into existing stacks of the same item first (stackable only).
+    if (stackable) {
+        for (i = 0; i < INVENTORY_SIZE && remaining > 0; i++) {
+            Item *slot = &gTeamInventoryRef->teamItems[i];
+            if (ItemExists(slot) && slot->id == itemId && slot->quantity < 99) {
+                s32 add = 99 - slot->quantity;
+                if (add > remaining)
+                    add = remaining;
+                slot->quantity += add;
+                remaining -= add;
+            }
+        }
     }
+
+    // Fill empty slots with what's left.
+    for (i = 0; i < INVENTORY_SIZE && remaining > 0; i++) {
+        Item *slot = &gTeamInventoryRef->teamItems[i];
+        if (!ItemExists(slot)) {
+            s32 add = stackable ? (remaining > 99 ? 99 : remaining) : 1;
+            slot->id = (u8)itemId;
+            slot->quantity = (u8)add;
+            slot->flags = ITEM_FLAG_EXISTS;
+            remaining -= add;
+        }
+    }
+
     FillInventoryGaps();
-    return added;
+    return quantity - remaining;
+}
+
+int Pc_CheatItemCount(void)
+{
+    return NUMBER_OF_ITEM_IDS;
+}
+
+void Pc_CheatItemDisplayName(int itemId, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0)
+        return;
+    out[0] = '\0';
+    if (gItemParametersData == NULL)
+        return;
+    if (itemId <= 0 || itemId >= NUMBER_OF_ITEM_IDS)
+        return;
+    if (gItemParametersData[itemId].name == NULL)
+        return;
+    Pc_DecodeItemText(gItemParametersData[itemId].name, out, cap, 48);
+}
+
+void Pc_CheatItemDescription(int itemId, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0)
+        return;
+    out[0] = '\0';
+    if (gItemParametersData == NULL)
+        return;
+    if (itemId <= 0 || itemId >= NUMBER_OF_ITEM_IDS)
+        return;
+    if (gItemParametersData[itemId].description == NULL)
+        return;
+    Pc_DecodeItemText(gItemParametersData[itemId].description, out, cap, 400);
 }
 
 int Pc_CheatInDungeon(void)
